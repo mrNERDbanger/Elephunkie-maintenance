@@ -163,6 +163,68 @@ class TicketManager: ObservableObject {
         addTicket(ticket)
     }
     
+    // Create ticket from detailed error report
+    func createTicketFromDetailedError(clientID: UUID, clientName: String, errorData: [String: Any]) {
+        let errorType = errorData["error_type"] as? String ?? "Unknown Error"
+        let message = errorData["message"] as? String ?? "No details available"
+        let file = errorData["file"] as? String ?? ""
+        let line = errorData["line"] as? Int ?? 0
+        let stackTrace = errorData["stack_trace"] as? String ?? ""
+        
+        var description = "**Automatic ticket created from critical error**\n\n"
+        description += "**Error Type:** \(errorType)\n"
+        description += "**Message:** \(message)\n"
+        
+        if !file.isEmpty {
+            description += "**File:** \(file)"
+            if line > 0 {
+                description += " (Line \(line))"
+            }
+            description += "\n"
+        }
+        
+        if !stackTrace.isEmpty {
+            description += "\n**Stack Trace:**\n```\n\(stackTrace)\n```\n"
+        }
+        
+        let ticket = Ticket(
+            id: UUID(),
+            title: "Critical Error: \(errorType) on \(clientName)",
+            description: description,
+            status: .open,
+            priority: .critical,
+            clientID: clientID,
+            clientName: clientName,
+            createdAt: Date(),
+            comments: [
+                TicketComment(
+                    id: UUID(),
+                    content: "This ticket was automatically generated from a critical error. Please investigate immediately.",
+                    author: "System",
+                    createdAt: Date()
+                )
+            ]
+        )
+        
+        addTicket(ticket)
+    }
+    
+    // Create ticket from recurring issues
+    func createTicketFromRecurringIssue(clientID: UUID, clientName: String, issueType: String, occurrences: Int) {
+        let ticket = Ticket(
+            id: UUID(),
+            title: "Recurring Issue: \(issueType) on \(clientName)",
+            description: "**Automatic ticket created from recurring issue**\n\n**Issue Type:** \(issueType)\n**Occurrences:** \(occurrences) times in the last 24 hours\n\nThis issue has occurred multiple times and requires attention to prevent further problems.",
+            status: .open,
+            priority: .high,
+            clientID: clientID,
+            clientName: clientName,
+            createdAt: Date()
+        )
+        
+        addTicket(ticket)
+    }
+    
     // Create sample tickets for demo
     private func createSampleTickets() {
         guard tickets.isEmpty else { return }

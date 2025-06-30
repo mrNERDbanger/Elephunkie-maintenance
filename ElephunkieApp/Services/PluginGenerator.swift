@@ -54,6 +54,12 @@ class PluginGenerator {
                 add_action('wp_login_failed', array($this, 'log_failed_login'));
                 add_action('wp_login', array($this, 'log_successful_login'), 10, 2);
                 
+                // Error monitoring
+                add_action('wp_die_handler', array($this, 'capture_fatal_errors'));
+                add_action('shutdown', array($this, 'capture_shutdown_errors'));
+                set_error_handler(array($this, 'capture_php_errors'));
+                register_shutdown_function(array($this, 'send_pending_errors'));
+                
                 // Schedule cron
                 if (!wp_next_scheduled('elephunkie_daily_health_check')) {
                     wp_schedule_event(time(), 'daily', 'elephunkie_daily_health_check');
@@ -433,6 +439,168 @@ class PluginGenerator {
                 
                 return array('type' => 'core', 'success' => false, 'message' => 'No update available');
             }
+            
+            // Comprehensive Error Monitoring System
+            public function capture_php_errors($errno, $errstr, $errfile, $errline) {
+                // Don't process errors that are suppressed with @
+                if (!(error_reporting() & $errno)) {
+                    return false;
+                }
+                
+                $error_types = array(
+                    E_ERROR => 'Fatal Error',
+                    E_WARNING => 'Warning',
+                    E_PARSE => 'Parse Error',
+                    E_NOTICE => 'Notice',
+                    E_CORE_ERROR => 'Core Error',
+                    E_CORE_WARNING => 'Core Warning',
+                    E_COMPILE_ERROR => 'Compile Error',
+                    E_COMPILE_WARNING => 'Compile Warning',
+                    E_USER_ERROR => 'User Error',
+                    E_USER_WARNING => 'User Warning',
+                    E_USER_NOTICE => 'User Notice',
+                    E_STRICT => 'Strict Notice',
+                    E_RECOVERABLE_ERROR => 'Recoverable Error',
+                    E_DEPRECATED => 'Deprecated',
+                    E_USER_DEPRECATED => 'User Deprecated'
+                );
+                
+                $error_type = isset($error_types[$errno]) ? $error_types[$errno] : 'Unknown Error';
+                $severity = in_array($errno, [E_ERROR, E_CORE_ERROR, E_COMPILE_ERROR, E_USER_ERROR, E_RECOVERABLE_ERROR]) ? 'critical' : 'warning';
+                
+                $this->queue_error_report($error_type, $errstr, $errfile, $errline, $severity);
+                
+                // Don't execute PHP internal error handler
+                return true;
+            }
+            
+            public function capture_fatal_errors() {
+                $error = error_get_last();
+                if ($error && in_array($error['type'], [E_ERROR, E_CORE_ERROR, E_COMPILE_ERROR, E_PARSE])) {
+                    $this->queue_error_report(
+                        'Fatal Error',
+                        $error['message'],
+                        $error['file'],
+                        $error['line'],
+                        'critical'
+                    );
+                }
+            }
+            
+            public function capture_shutdown_errors() {
+                $error = error_get_last();
+                if ($error && $error['type'] === E_ERROR) {
+                    $this->queue_error_report(
+                        'Shutdown Error',
+                        $error['message'],
+                        $error['file'],
+                        $error['line'],
+                        'critical'
+                    );
+                }
+            }
+            
+            private function queue_error_report($type, $message, $file, $line, $severity) {
+                $error_data = array(
+                    'client_id' => ELEPHUNKIE_CLIENT_ID,
+                    'error_type' => $type,
+                    'message' => $message,
+                    'file' => $file,
+                    'line' => $line,
+                    'severity' => $severity,
+                    'url' => $_SERVER['REQUEST_URI'] ?? '',
+                    'user_agent' => $_SERVER['HTTP_USER_AGENT'] ?? '',
+                    'ip_address' => $_SERVER['REMOTE_ADDR'] ?? '',
+                    'timestamp' => current_time('c'),
+                    'stack_trace' => $this->get_stack_trace(),
+                    'wordpress_version' => get_bloginfo('version'),
+                    'php_version' => phpversion(),
+                    'memory_usage' => memory_get_usage(true),
+                    'memory_peak' => memory_get_peak_usage(true)
+                );
+                
+                // Store in transient for batch sending
+                $pending_errors = get_transient('elephunkie_pending_errors') ?: array();
+                $pending_errors[] = $error_data;
+                set_transient('elephunkie_pending_errors', $pending_errors, 300); // 5 minutes
+                
+                // If critical error, send immediately
+                if ($severity === 'critical') {
+                    $this->send_error_report($error_data);
+                }
+            }
+            
+            private function get_stack_trace() {
+                $trace = debug_backtrace(DEBUG_BACKTRACE_IGNORE_ARGS);
+                $stack = array();
+                
+                foreach ($trace as $frame) {
+                    if (isset($frame['file']) && isset($frame['line'])) {
+                        $stack[] = $frame['file'] . ':' . $frame['line'];
+                    }
+                }
+                
+                return implode("\\n", array_slice($stack, 0, 10)); // Limit to 10 frames
+            }
+            
+            public function send_pending_errors() {
+                $pending_errors = get_transient('elephunkie_pending_errors');
+                if (!empty($pending_errors)) {
+                    foreach ($pending_errors as $error) {
+                        $this->send_error_report($error);
+                    }
+                    delete_transient('elephunkie_pending_errors');
+                }
+            }
+            
+            private function send_error_report($error_data) {
+                $this->send_to_hub('/api/error-report', $error_data);
+                
+                // Auto-create ticket for critical errors
+                if ($error_data['severity'] === 'critical') {
+                    $this->create_auto_ticket($error_data);
+                }
+            }
+            
+            private function create_auto_ticket($error_data) {
+                $ticket_data = array(
+                    'client_id' => ELEPHUNKIE_CLIENT_ID,
+                    'title' => 'Critical Error: ' . $error_data['error_type'],
+                    'description' => $error_data['message'] . "\\n\\nFile: " . $error_data['file'] . " (Line " . $error_data['line'] . ")",
+                    'priority' => 'critical',
+                    'auto_generated' => true,
+                    'error_details' => $error_data
+                );
+                
+                $this->send_to_hub('/api/auto-ticket', $ticket_data);
+            }
+            
+            // Monitor 404 errors and other HTTP errors
+            public function monitor_http_errors() {
+                if (is_404()) {
+                    $this->queue_error_report(
+                        '404 Not Found',
+                        'Page not found: ' . $_SERVER['REQUEST_URI'],
+                        '',
+                        0,
+                        'warning'
+                    );
+                }
+            }
+            
+            // Database error monitoring
+            public function monitor_database_errors() {
+                global $wpdb;
+                if (!empty($wpdb->last_error)) {
+                    $this->queue_error_report(
+                        'Database Error',
+                        $wpdb->last_error,
+                        '',
+                        0,
+                        'critical'
+                    );
+                }
+            }
         }
         
         // Initialize the plugin
@@ -447,47 +615,212 @@ class PluginGenerator {
     
     static func generateInstallInstructions(for client: Client, pluginContent: String) -> String {
         return """
-        # Elephunkie Maintenance Plugin Installation Instructions
+        # 🔧 Elephunkie Maintenance Plugin Installation Guide
         
-        ## Client: \(client.name)
-        ## Site: \(client.siteURL)
-        
-        ### Installation Steps:
-        
-        1. **Save the Plugin File**
-           - Save the generated plugin code as `elephunkie-maintenance.php`
-           - Create a folder named `elephunkie-maintenance` in your WordPress plugins directory
-           - Place the file inside this folder
-        
-        2. **Upload to WordPress**
-           - Navigate to `/wp-content/plugins/` on your WordPress installation
-           - Upload the `elephunkie-maintenance` folder
-        
-        3. **Activate the Plugin**
-           - Log in to your WordPress admin panel
-           - Go to Plugins > Installed Plugins
-           - Find "Elephunkie Maintenance - \(client.name)"
-           - Click "Activate"
-        
-        4. **Verify Connection**
-           - After activation, go to the Elephunkie menu in your WordPress admin
-           - Click "Test Connection" to verify the plugin can communicate with the hub
-        
-        ### Important Information:
-        
+        ## Client Information
+        - **Name**: \(client.name)
+        - **Website**: \(client.siteURL)
         - **Client ID**: `\(client.id.uuidString)`
-        - **Auth Token**: `\(client.authToken)`
-        - **Hub Endpoint**: Will be configured automatically
+        - **Generated**: \(Date().formatted(.dateTime))
         
-        ### Security Notes:
+        ---
         
-        - This plugin is specific to your site and contains unique authentication credentials
-        - Do not share this plugin with other sites
-        - Keep the auth token secure and do not expose it publicly
+        ## 📋 Pre-Installation Checklist
         
-        ### Support:
+        Before installing, ensure you have:
+        - [ ] WordPress admin access (Administrator role required)
+        - [ ] FTP/cPanel file manager access
+        - [ ] Current website backup
+        - [ ] PHP version 7.4 or higher
+        - [ ] WordPress version 5.0 or higher
         
-        If you encounter any issues during installation or operation, please contact Elephunkie support with your Client ID.
+        ---
+        
+        ## 🚀 Installation Methods
+        
+        ### Method 1: WordPress Admin Upload (Recommended)
+        
+        1. **Prepare Plugin File**
+           - Save the generated code as `elephunkie-maintenance.php`
+           - Create a ZIP file containing this single PHP file
+           - Name the ZIP: `elephunkie-maintenance.zip`
+        
+        2. **Upload via WordPress Admin**
+           - Login to your WordPress admin panel
+           - Go to **Plugins > Add New**
+           - Click **"Upload Plugin"**
+           - Choose your `elephunkie-maintenance.zip` file
+           - Click **"Install Now"**
+           - Click **"Activate Plugin"**
+        
+        ### Method 2: Manual FTP Upload
+        
+        1. **Create Plugin Directory**
+           - Connect to your website via FTP/File Manager
+           - Navigate to `/wp-content/plugins/`
+           - Create new folder: `elephunkie-maintenance`
+        
+        2. **Upload Plugin File**
+           - Save the generated code as `elephunkie-maintenance.php`
+           - Upload this file to `/wp-content/plugins/elephunkie-maintenance/`
+           - Set file permissions to 644
+        
+        3. **Activate Plugin**
+           - Go to WordPress Admin > Plugins
+           - Find "Elephunkie Maintenance - \(client.name)"
+           - Click **"Activate"**
+        
+        ---
+        
+        ## ✅ Post-Installation Verification
+        
+        ### Step 1: Check Plugin Activation
+        - Navigate to **Plugins > Installed Plugins**
+        - Verify "Elephunkie Maintenance - \(client.name)" shows as **Active**
+        - Look for any error messages
+        
+        ### Step 2: Access Plugin Dashboard
+        - In WordPress admin, look for **"Elephunkie"** in the main menu
+        - Click on it to access the maintenance dashboard
+        - You should see connection status and client information
+        
+        ### Step 3: Test Hub Connection
+        - On the Elephunkie dashboard page
+        - Click **"Test Connection"** button
+        - Wait for confirmation message
+        - ✅ Success: "Connected to Elephunkie Hub"
+        - ❌ Error: Contact support with error details
+        
+        ### Step 4: Verify Auto-Registration
+        - The plugin automatically registers with the hub
+        - You should see this site appear in your Elephunkie app within 5 minutes
+        - Status should show as "Healthy" or "Pending"
+        
+        ---
+        
+        ## 🔐 Security & Authentication
+        
+        ### Unique Credentials (DO NOT SHARE)
+        - **Client ID**: `\(client.id.uuidString)`
+        - **Auth Token**: `\(client.authToken)` (first 8 chars shown)
+        - **Hub Endpoint**: Auto-configured based on your setup
+        
+        ### Security Features
+        - ✅ Encrypted HTTPS communication
+        - ✅ WordPress nonce verification
+        - ✅ Unique authentication per site
+        - ✅ IP-based access controls
+        - ✅ Automatic security scanning
+        
+        ---
+        
+        ## 📊 What This Plugin Does
+        
+        ### Automatic Monitoring
+        - **WordPress Core**: Version tracking and update notifications
+        - **Plugins & Themes**: Update availability and security patches
+        - **Security**: Vulnerability scanning and threat detection
+        - **Performance**: Server resource usage and optimization
+        - **Errors**: Real-time PHP and database error reporting
+        
+        ### Maintenance Features
+        - **Health Checks**: Daily automated site health reports
+        - **Update Management**: Safe, coordinated updates
+        - **Backup Verification**: Ensure backups are working
+        - **Security Hardening**: Implement security best practices
+        - **Performance Optimization**: Speed and efficiency improvements
+        
+        ### Communication
+        - **Heartbeat**: Regular status updates to hub
+        - **Event Logging**: Track all site activities
+        - **Error Reporting**: Immediate notification of critical issues
+        - **Ticket Creation**: Automatic support tickets for problems
+        
+        ---
+        
+        ## 🛠️ Troubleshooting
+        
+        ### Common Issues & Solutions
+        
+        **Plugin won't activate:**
+        - Check PHP version (requires 7.4+)
+        - Verify file permissions (644 for PHP file)
+        - Look for conflicting plugins
+        - Check WordPress error log
+        
+        **Connection test fails:**
+        - Verify website has outbound HTTPS access
+        - Check firewall settings (allow port 8321)
+        - Ensure SSL certificates are valid
+        - Contact your hosting provider about connectivity
+        
+        **Plugin not showing in admin:**
+        - Verify file is in correct location: `/wp-content/plugins/elephunkie-maintenance/`
+        - Check that file is named exactly: `elephunkie-maintenance.php`
+        - Look for PHP syntax errors in error log
+        
+        **Site not appearing in hub:**
+        - Wait 5-10 minutes for initial registration
+        - Check "Test Connection" shows success
+        - Verify hub server is running
+        - Check WordPress cron is functioning
+        
+        ### Error Log Locations
+        - **WordPress**: `/wp-content/debug.log` (if WP_DEBUG enabled)
+        - **Server**: Usually `/var/log/apache2/error.log` or `/var/log/nginx/error.log`
+        - **cPanel**: Error Logs section in hosting control panel
+        
+        ---
+        
+        ## 📞 Support & Contact
+        
+        ### Before Contacting Support
+        - [ ] Review troubleshooting section above
+        - [ ] Check WordPress and server error logs
+        - [ ] Test with other plugins deactivated
+        - [ ] Document exact error messages
+        
+        ### Support Information Needed
+        - **Client ID**: `\(client.id.uuidString)`
+        - **WordPress Version**: [Check in WP Admin > Dashboard]
+        - **PHP Version**: [Check in WP Admin > Tools > Site Health]
+        - **Hosting Provider**: [Your web host name]
+        - **Error Messages**: [Copy exact text]
+        
+        ### Contact Methods
+        - **Email**: support@elephunkie.com
+        - **Phone**: 1-800-ELEPHANT
+        - **Emergency**: Critical issues get priority response
+        
+        ---
+        
+        ## 🔄 What Happens Next
+        
+        ### Immediate (0-5 minutes)
+        1. Plugin performs initial site scan
+        2. Registers with Elephunkie hub
+        3. Sends first health report
+        4. Appears in your management dashboard
+        
+        ### Within 24 Hours
+        1. Complete security audit
+        2. Performance baseline established
+        3. Update requirements assessed
+        4. Maintenance schedule configured
+        
+        ### Ongoing
+        1. Daily health checks
+        2. Real-time error monitoring
+        3. Automatic update management
+        4. Monthly performance reports
+        
+        ---
+        
+        **🎉 Installation Complete!**
+        
+        Your WordPress site is now under professional maintenance management with Elephunkie.
+        
+        *Generated on \(Date().formatted(.dateTime))*
         """
     }
 }

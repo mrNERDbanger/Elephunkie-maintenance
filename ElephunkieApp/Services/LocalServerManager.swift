@@ -149,6 +149,12 @@ final class HTTPHandler: ChannelInboundHandler {
             handleScanResults(context: context, request: request)
         case "/api/register":
             handleClientRegistration(context: context, request: request)
+        case "/api/error-report":
+            handleErrorReport(context: context, request: request)
+        case "/api/auto-ticket":
+            handleAutoTicket(context: context, request: request)
+        case "/api/events":
+            handleEvents(context: context, request: request)
         default:
             sendResponse(context: context, status: .notFound, body: "Not Found")
         }
@@ -167,6 +173,40 @@ final class HTTPHandler: ChannelInboundHandler {
     private func handleClientRegistration(context: ChannelHandlerContext, request: HTTPRequestHead) {
         // Handle new client registration
         sendResponse(context: context, status: .ok, body: "Client registered")
+    }
+    
+    private func handleErrorReport(context: ChannelHandlerContext, request: HTTPRequestHead) {
+        // Handle error reports from WordPress sites
+        // Parse error data and add to logs
+        let response = ["status": "received", "message": "Error report logged"]
+        sendJSONResponse(context: context, response: response)
+        
+        // In a real implementation, you would:
+        // 1. Parse the JSON body containing error details
+        // 2. Add to LogManager
+        // 3. Check if it should create an auto-ticket
+    }
+    
+    private func handleAutoTicket(context: ChannelHandlerContext, request: HTTPRequestHead) {
+        // Handle auto-generated tickets from critical errors
+        let response = ["status": "created", "message": "Auto-ticket created"]
+        sendJSONResponse(context: context, response: response)
+        
+        // In a real implementation, you would:
+        // 1. Parse the JSON body containing ticket data
+        // 2. Add to TicketManager with auto-generated flag
+        // 3. Send notification if configured
+    }
+    
+    private func handleEvents(context: ChannelHandlerContext, request: HTTPRequestHead) {
+        // Handle general events from WordPress sites
+        let response = ["status": "logged", "message": "Event received"]
+        sendJSONResponse(context: context, response: response)
+        
+        // In a real implementation, you would:
+        // 1. Parse event data (login attempts, plugin changes, etc.)
+        // 2. Log to appropriate system
+        // 3. Update client status if needed
     }
     
     private func handleRequestEnd(context: ChannelHandlerContext) {
