@@ -1,4 +1,11 @@
 import SwiftUI
+import UniformTypeIdentifiers
+
+#if os(macOS)
+import AppKit
+#else
+import UIKit
+#endif
 
 struct ClientsView: View {
     @EnvironmentObject var appState: AppState

@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import UniformTypeIdentifiers
 
 @MainActor
 class AppState: ObservableObject {
@@ -16,11 +17,14 @@ class AppState: ObservableObject {
     private let cloudflareService: CloudflareService
     
     init() {
-        // Initialize with credentials from secure storage
+        // Initialize with credentials from config
         self.cloudflareService = CloudflareService(
-            apiToken: UserDefaults.standard.string(forKey: "cloudflare_api_token") ?? "",
-            zoneID: UserDefaults.standard.string(forKey: "cloudflare_zone_id") ?? ""
+            apiToken: AppConfig.cloudflareAPIToken,
+            zoneID: AppConfig.cloudflareZoneID
         )
+        
+        // Initialize storage
+        AppConfig.initializeStorage()
         
         Task {
             await loadClients()

@@ -1,5 +1,8 @@
 import SwiftUI
+
+#if canImport(Charts)
 import Charts
+#endif
 
 struct DashboardView: View {
     @EnvironmentObject var appState: AppState

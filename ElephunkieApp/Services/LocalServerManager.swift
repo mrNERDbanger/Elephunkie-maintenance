@@ -3,6 +3,12 @@ import NIO
 import NIOHTTP1
 import NIOSSL
 
+enum ServerError: Error {
+    case certificatesNotFound
+    case bindFailed
+    case sslContextCreationFailed
+}
+
 @MainActor
 class LocalServerManager: ObservableObject {
     @Published var isRunning = false
@@ -72,11 +78,31 @@ class LocalServerManager: ObservableObject {
     }
     
     private func createSSLContext() throws -> NIOSSLContext {
-        // In production, use proper certificates
-        // For now, create self-signed certificate
+        // Use the generated SSL certificates
+        let bundle = Bundle.main
+        guard let certPath = bundle.path(forResource: "server", ofType: "crt"),
+              let keyPath = bundle.path(forResource: "server", ofType: "key") else {
+            
+            // Fallback: try to use certificates from Resources directory
+            let resourcesPath = FileManager.default.currentDirectoryPath + "/ElephunkieApp/Resources/Certificates"
+            let certFile = resourcesPath + "/server.crt"
+            let keyFile = resourcesPath + "/server.key"
+            
+            if FileManager.default.fileExists(atPath: certFile) && 
+               FileManager.default.fileExists(atPath: keyFile) {
+                let configuration = TLSConfiguration.makeServerConfiguration(
+                    certificateChain: [.file(certFile)],
+                    privateKey: .file(keyFile)
+                )
+                return try NIOSSLContext(configuration: configuration)
+            }
+            
+            throw ServerError.certificatesNotFound
+        }
+        
         let configuration = TLSConfiguration.makeServerConfiguration(
-            certificateChain: [.file("/path/to/cert.pem")],
-            privateKey: .file("/path/to/key.pem")
+            certificateChain: [.file(certPath)],
+            privateKey: .file(keyPath)
         )
         return try NIOSSLContext(configuration: configuration)
     }
