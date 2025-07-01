@@ -8,9 +8,10 @@ let package = Package(
         .iOS(.v16)
     ],
     products: [
-        .library(
-            name: "ElephunkieCore",
-            targets: ["ElephunkieCore"]),
+        .executable(
+            name: "ElephunkieApp",
+            targets: ["ElephunkieCore"]
+        ),
     ],
     dependencies: [
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.62.0"),
@@ -20,7 +21,7 @@ let package = Package(
         .package(url: "https://github.com/vapor/jwt-kit.git", from: "4.13.0"),
     ],
     targets: [
-        .target(
+        .executableTarget(
             name: "ElephunkieCore",
             dependencies: [
                 .product(name: "NIO", package: "swift-nio"),
@@ -30,9 +31,12 @@ let package = Package(
                 .product(name: "AsyncHTTPClient", package: "async-http-client"),
                 .product(name: "JWTKit", package: "jwt-kit"),
             ],
-            path: "Sources/ElephunkieCore"),
+            path: "Sources/ElephunkieCore"
+        ),
         .testTarget(
             name: "ElephunkieCoreTests",
-            dependencies: ["ElephunkieCore"]),
+            dependencies: ["ElephunkieCore"],
+            path: "Tests"
+        ),
     ]
 )
